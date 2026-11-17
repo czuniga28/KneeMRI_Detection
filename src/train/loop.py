@@ -202,10 +202,8 @@ def evaluate(
     return {'tau': float(tau), 'iou': float(ious.mean()), **by_class, **cls, 'ious': ious}
 
 
-def _subsample(
-    train: pd.DataFrame, val: pd.DataFrame, max_slices: int, seed: int,
-) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Smoke-test subsets: max_slices training slices, half positive, and 2 whole val volumes."""
+def _subsample_train(train: pd.DataFrame, max_slices: int, seed: int) -> pd.DataFrame:
+    """Smoke-test subset: max_slices training slices, half positive."""
     rng = np.random.default_rng(seed)
     contains_acl = train['contains_acl'].to_numpy(dtype=bool)
     pos, neg = np.flatnonzero(contains_acl), np.flatnonzero(~contains_acl)
@@ -214,11 +212,53 @@ def _subsample(
     keep = np.sort(np.concatenate([
         rng.choice(pos, n_pos, replace=False), rng.choice(neg, n_neg, replace=False),
     ]))
+    return train.iloc[keep].reset_index(drop=True)
 
+
+def _subsample(
+    train: pd.DataFrame, val: pd.DataFrame, max_slices: int, seed: int,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Smoke-test subsets: _subsample_train plus 2 whole val volumes."""
+    train = _subsample_train(train, max_slices, seed)
     # Whole volumes only: aggregate_predictions rejects a volume with missing slices
     first_two = val[KEY].drop_duplicates().head(2)
     val = val.merge(first_two, on=KEY)
-    return train.iloc[keep].reset_index(drop=True), val.reset_index(drop=True)
+    return train, val.reset_index(drop=True)
+
+
+def _setup_training(cfg: dict, train: pd.DataFrame, device: torch.device) -> dict:
+    """
+    Everything run and the refit share before the epoch loop.
+
+    The call order is fixed: sampler.sample() and SliceNet's head init draw from
+    the RNG, so reordering them changes what a given seed produces.
+
+    Returns:
+        Dict with train_loader, sampler, pw, model, optimizer, scheduler,
+        box_terms, context and loader_kwargs (for building a val loader).
+    """
+    processed_dir = PROJECT_ROOT / cfg['data']['processed_dir']
+    # .get: keys added for the ablations; their defaults reproduce the earlier runs
+    context = cfg.get('context', 1)
+    box_terms = tuple(cfg.get('box_terms', ('l1', 'giou')))
+    train_ds = SliceDataset(
+        train, processed_dir, size=cfg['image_size'], augment=True,
+        max_shift=cfg['max_shift'], context=context,
+    )
+    sampler = EpochSampler(train, cfg['seed'], **cfg['sampler'])
+    loader_kwargs = {'batch_size': cfg['batch_size'], 'num_workers': cfg['num_workers']}
+    train_loader = DataLoader(train_ds, sampler=sampler, **loader_kwargs)
+
+    pw = pos_weight(train, sampler.sample())
+
+    model = SliceNet(**cfg['model']).to(device)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=cfg['lr'], weight_decay=cfg['weight_decay'])
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=cfg['epochs'])
+    return {
+        'train_loader': train_loader, 'sampler': sampler, 'pw': pw, 'model': model,
+        'optimizer': optimizer, 'scheduler': scheduler, 'box_terms': box_terms,
+        'context': context, 'loader_kwargs': loader_kwargs,
+    }
 
 
 def run(
@@ -268,26 +308,17 @@ def run(
         train, val = _subsample(train, val, max_slices, cfg['seed'])
     gt = volume_boxes(volumes.merge(val[KEY].drop_duplicates(), on=KEY))
 
-    processed_dir = PROJECT_ROOT / cfg['data']['processed_dir']
-    size = cfg['image_size']
-    # .get: keys added for the ablations; their defaults reproduce the earlier runs
-    context = cfg.get('context', 1)
-    box_terms = tuple(cfg.get('box_terms', ('l1', 'giou')))
+    setup = _setup_training(cfg, train, dev)
+    train_loader, sampler, pw = setup['train_loader'], setup['sampler'], setup['pw']
+    model, optimizer, scheduler = setup['model'], setup['optimizer'], setup['scheduler']
+    box_terms = setup['box_terms']
     aggregation = cfg.get('aggregation', {})
-    train_ds = SliceDataset(
-        train, processed_dir, size=size, augment=True, max_shift=cfg['max_shift'], context=context,
+
+    val_ds = SliceDataset(
+        val, PROJECT_ROOT / cfg['data']['processed_dir'],
+        size=cfg['image_size'], context=setup['context'],
     )
-    val_ds = SliceDataset(val, processed_dir, size=size, context=context)
-    sampler = EpochSampler(train, cfg['seed'], **cfg['sampler'])
-    loader_kwargs = {'batch_size': cfg['batch_size'], 'num_workers': cfg['num_workers']}
-    train_loader = DataLoader(train_ds, sampler=sampler, **loader_kwargs)
-    val_loader = DataLoader(val_ds, shuffle=False, **loader_kwargs)
-
-    pw = pos_weight(train, sampler.sample())
-
-    model = SliceNet(**cfg['model']).to(dev)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=cfg['lr'], weight_decay=cfg['weight_decay'])
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=cfg['epochs'])
+    val_loader = DataLoader(val_ds, shuffle=False, **setup['loader_kwargs'])
 
     history, best, bad_epochs = [], None, 0
     for epoch in range(cfg['epochs']):
@@ -337,6 +368,107 @@ def run(
         **best,
         'pos_weight': pw,
         'seconds_per_epoch': float(np.mean([h['seconds'] for h in history])),
+    }
+    (out_dir / 'metrics.json').write_text(json.dumps(metrics, indent=2))
+    return metrics
+
+
+def check_refit_config(cfg: dict) -> None:
+    """
+    Raise ValueError unless cfg is a refit config: no val_fold, refit_epochs
+    and tau present, and 1 <= refit_epochs <= epochs.
+    """
+    if cfg.get('val_fold') is not None:
+        raise ValueError("refit trains on every development fold; use run to validate on one")
+    missing = [k for k in ('refit_epochs', 'tau') if cfg.get(k) is None]
+    if missing:
+        raise ValueError(
+            f"config lacks {', '.join(missing)}; generate the refit config with scripts/cv.py"
+        )
+    if not 1 <= cfg['refit_epochs'] <= cfg['epochs']:
+        raise ValueError(
+            f"refit_epochs must be in [1, epochs={cfg['epochs']}], got {cfg['refit_epochs']}"
+        )
+
+
+def refit(
+    cfg: dict,
+    out_dir: Path,
+    max_slices: int | None = None,
+    device: str | None = None,
+) -> dict:
+    """
+    Train on all development folds for cfg['refit_epochs'] epochs: no
+    validation, no early stopping, no epoch selection (patience is ignored).
+
+    The schedule is the CV one (T_max = cfg['epochs']) cut at refit_epochs, so
+    refit_epochs = best_epoch + 1 trains the same epochs 0..best_epoch the CV
+    validated. Test is never touched here; that is evaluate_test.py's job.
+
+    Writes to out_dir: history.csv (one row per epoch); last.pt, with the same
+    keys as run's best.pt; and metrics.json.
+
+    Args:
+        cfg: Parsed configs/train/m1_refit.yaml, written by scripts/cv.py.
+        out_dir: Directory for the outputs; created if missing.
+        max_slices: If given, a smoke test on that many training slices (half positive).
+        device: Device name, or None to pick MPS when available.
+
+    Returns:
+        Dict with epochs_trained, final_lr (the LR of the last epoch),
+        pos_weight, seconds_per_epoch, n_train_slices, n_train_volumes and
+        train_folds.
+
+    Raises:
+        ValueError: If cfg has a val_fold, lacks refit_epochs or tau, or
+            refit_epochs is not in [1, epochs].
+    """
+    check_refit_config(cfg)
+
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    set_seed(cfg['seed'])
+    dev = get_device(device)
+    slices, _ = load_data(cfg)
+
+    train = train_slices(slices, None)
+    if max_slices is not None:
+        train = _subsample_train(train, max_slices, cfg['seed'])
+
+    setup = _setup_training(cfg, train, dev)
+    train_loader, sampler, pw = setup['train_loader'], setup['sampler'], setup['pw']
+    model, optimizer, scheduler = setup['model'], setup['optimizer'], setup['scheduler']
+
+    history = []
+    for epoch in range(cfg['refit_epochs']):
+        start = time.perf_counter()
+        sampler.set_epoch(epoch)
+        lr = optimizer.param_groups[0]['lr']
+        losses = train_one_epoch(
+            model, train_loader, optimizer, pw, cfg['box_weight'], dev, setup['box_terms'],
+        )
+        scheduler.step()
+        history.append({
+            'epoch': epoch, 'lr': lr,
+            'train_cls': losses['cls'], 'train_box': losses['box'],
+            'seconds': time.perf_counter() - start,
+        })
+        pd.DataFrame(history).to_csv(out_dir / 'history.csv', index=False)
+
+    torch.save(
+        {'model': model.state_dict(), 'epoch': cfg['refit_epochs'] - 1, 'tau': cfg['tau'], 'cfg': cfg},
+        out_dir / 'last.pt',
+    )
+    metrics = {
+        'epochs_trained': len(history),
+        # Nonzero unless the cosine was compressed to refit_epochs
+        'final_lr': history[-1]['lr'],
+        'pos_weight': pw,
+        'seconds_per_epoch': float(np.mean([h['seconds'] for h in history])),
+        'n_train_slices': len(train),
+        'n_train_volumes': len(train[KEY].drop_duplicates()),
+        'train_folds': sorted(train['split'].unique().tolist()),
     }
     (out_dir / 'metrics.json').write_text(json.dumps(metrics, indent=2))
     return metrics

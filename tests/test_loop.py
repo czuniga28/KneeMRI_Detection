@@ -2,6 +2,7 @@ import hashlib
 import json
 import math
 import random
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -20,6 +21,7 @@ from src.train.loop import (
     get_device,
     load_data,
     predict,
+    refit,
     run,
     set_seed,
     train_one_epoch,
@@ -277,3 +279,75 @@ def test_evaluate_passes_the_aggregation_methods():
     threshold = evaluate(preds, volume_boxes(volumes), TAUS, tau=0.5, z_method='threshold')
 
     assert kadane['ious'][0] > threshold['ious'][0]
+
+
+@pytest.fixture
+def refit_cfg(run_cfg) -> dict:
+    return {**run_cfg, 'val_fold': None, 'refit_epochs': 2, 'epochs': 4, 'tau': 0.5}
+
+
+@pytest.mark.parametrize('change, drop, match', [
+    ({'val_fold': 'fold_0'}, None, 'use run'),
+    ({}, 'refit_epochs', 'scripts/cv.py'),
+    ({}, 'tau', 'scripts/cv.py'),
+    ({'refit_epochs': 5}, None, r'\[1, epochs=4\]'),
+])
+def test_refit_rejects_bad_config(refit_cfg, tmp_path, change, drop, match):
+    cfg = {**refit_cfg, **change}
+    cfg.pop(drop, None)
+    with pytest.raises(ValueError, match=match):
+        refit(cfg, tmp_path / 'refit', device='cpu')
+    # Fails before touching anything
+    assert not (tmp_path / 'refit').exists()
+
+
+def test_refit_smoke_writes_outputs(refit_cfg, tmp_path):
+    out = tmp_path / 'refit'
+    metrics = refit(refit_cfg, out, max_slices=16, device='cpu')
+
+    assert {p.name for p in out.iterdir()} == {'last.pt', 'metrics.json', 'history.csv'}
+    assert len(pd.read_csv(out / 'history.csv')) == refit_cfg['refit_epochs']
+    assert json.loads((out / 'metrics.json').read_text()) == pytest.approx(metrics)
+    assert metrics['epochs_trained'] == refit_cfg['refit_epochs']
+
+
+def test_refit_follows_the_uncompressed_cosine(refit_cfg, tmp_path):
+    refit(refit_cfg, tmp_path / 'refit', max_slices=16, device='cpu')
+    lrs = pd.read_csv(tmp_path / 'refit' / 'history.csv')['lr'].tolist()
+
+    # T_max = epochs, not refit_epochs: the curve the CV validated, cut early
+    lr, epochs = refit_cfg['lr'], refit_cfg['epochs']
+    for k, got in enumerate(lrs):
+        assert math.isclose(got, lr * (1 + math.cos(math.pi * k / epochs)) / 2)
+    metrics = json.loads((tmp_path / 'refit' / 'metrics.json').read_text())
+    assert math.isclose(metrics['final_lr'], lrs[-1]) and metrics['final_lr'] > 0
+
+
+def test_refit_trains_on_every_dev_fold_and_never_test(refit_cfg, tmp_path):
+    # Move one exam to test; refit must leave it out
+    interim = Path(refit_cfg['data']['interim_dir'])
+    slices_csv = Path(refit_cfg['data']['processed_dir']) / 'slices.csv'
+    splits, slices = pd.read_csv(interim / 'splits.csv'), pd.read_csv(slices_csv)
+    test_exam = splits['examId'].iloc[0]
+    for df in (splits, slices):
+        df.loc[df['examId'] == test_exam, 'split'] = 'test'
+    splits.to_csv(interim / 'splits.csv', index=False)
+    slices.to_csv(slices_csv, index=False)
+
+    metrics = refit(refit_cfg, tmp_path / 'refit', device='cpu')
+
+    assert metrics['train_folds'] == ['fold_0', 'fold_1']
+    dev = slices[slices['split'] != 'test']
+    assert metrics['n_train_slices'] == len(dev)
+    assert metrics['n_train_volumes'] == len(dev[['examId', 'seriesNo']].drop_duplicates())
+
+
+def test_refit_checkpoint_matches_best_pt(refit_cfg, run_cfg, tmp_path):
+    refit(refit_cfg, tmp_path / 'refit', max_slices=16, device='cpu')
+    run(run_cfg, tmp_path / 'run', max_slices=16, device='cpu')
+
+    last = torch.load(tmp_path / 'refit' / 'last.pt', weights_only=False)
+    best = torch.load(tmp_path / 'run' / 'best.pt', weights_only=False)
+    assert set(last) == set(best)
+    assert last['tau'] == refit_cfg['tau']
+    assert last['epoch'] == refit_cfg['refit_epochs'] - 1

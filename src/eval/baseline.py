@@ -58,3 +58,24 @@ def cv_fixed_box(volumes: pd.DataFrame, n_cv_folds: int) -> pd.DataFrame:
             fold=fold, part=np.where(is_val, 'val', 'train'), iou=ious,
         ))
     return pd.concat(parts, ignore_index=True)
+
+
+def fixed_box_test(volumes: pd.DataFrame) -> pd.DataFrame:
+    """
+    M0 on test: the mean box of every development volume, scored on the test volumes.
+
+    The test boxes are only ever the targets, never part of the mean.
+
+    Args:
+        volumes: One row per volume with examId, seriesNo, aclDiagnosis, split
+            and the roi* columns.
+
+    Returns:
+        One row per test volume: examId, seriesNo, aclDiagnosis and iou.
+    """
+    is_test = (volumes['split'] == 'test').to_numpy()
+    if not is_test.any() or is_test.all():
+        raise ValueError("need both development and test volumes")
+    box = mean_box(roi_to_box3d(volumes[~is_test]))
+    test = volumes[is_test].reset_index(drop=True)
+    return test[['examId', 'seriesNo', 'aclDiagnosis']].assign(iou=iou_3d(roi_to_box3d(test), box))

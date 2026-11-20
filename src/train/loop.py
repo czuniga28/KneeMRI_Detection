@@ -160,6 +160,28 @@ def predict(
     return preds
 
 
+def predict_checkpoint(ck: dict, slices: pd.DataFrame, device: torch.device) -> pd.DataFrame:
+    """
+    Per-slice predictions of a saved checkpoint (run's best.pt or refit's
+    last.pt) on slices, without augmentation and in order.
+
+    scripts/evaluate_test.py inlines the same steps on purpose: it already ran
+    and must stay byte-identical to what produced the test results.
+    """
+    cfg = ck['cfg']
+    # Weights are overwritten below, so skip the ImageNet download
+    model = SliceNet(**{**cfg['model'], 'pretrained': False}).to(device)
+    model.load_state_dict(ck['model'])
+    model.eval()
+
+    ds = SliceDataset(
+        slices, PROJECT_ROOT / cfg['data']['processed_dir'],
+        size=cfg['image_size'], augment=False, context=cfg.get('context', 1),
+    )
+    loader = DataLoader(ds, shuffle=False, batch_size=cfg['batch_size'], num_workers=cfg['num_workers'])
+    return predict(model, loader, slices, device, cfg['data']['width'], cfg['data']['height'])
+
+
 def evaluate(
     preds: pd.DataFrame,
     gt: pd.DataFrame,

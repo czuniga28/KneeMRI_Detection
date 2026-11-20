@@ -1,4 +1,5 @@
 import numpy as np
+from scipy.stats import spearmanr
 
 
 def paired_bootstrap(
@@ -35,6 +36,39 @@ def paired_bootstrap(
 
     ci_ = bootstrap_mean(a - b, n=n, seed=seed, ci=ci)
     return {'delta': ci_['mean'], 'lo': ci_['lo'], 'hi': ci_['hi']}
+
+
+def bootstrap_spearman(
+    x: np.ndarray,
+    y: np.ndarray,
+    n: int = 2000,
+    seed: int = 42,
+    ci: float = 0.95,
+) -> dict[str, float]:
+    """
+    Percentile bootstrap interval for Spearman's rho between x and y.
+
+    Resamples (x, y) pairs, one per independent unit (volume). Resamples where
+    either side is constant have no rho and are skipped.
+
+    Returns:
+        {'rho': rho on the full sample, 'lo': lower bound, 'hi': upper bound}.
+
+    Raises:
+        ValueError: If x and y differ in shape, are not 1-D or have < 3 pairs.
+    """
+    x, y = np.asarray(x, dtype=float), np.asarray(y, dtype=float)
+    if x.shape != y.shape or x.ndim != 1 or x.size < 3:
+        raise ValueError(f"x and y must be 1-D arrays of the same shape with >= 3 pairs, got {x.shape} and {y.shape}")
+
+    rng = np.random.default_rng(seed)
+    rhos = np.empty(n)
+    for i, idx in enumerate(rng.integers(0, len(x), size=(n, len(x)))):
+        xi, yi = x[idx], y[idx]
+        rhos[i] = np.nan if np.ptp(xi) == 0 or np.ptp(yi) == 0 else spearmanr(xi, yi).statistic
+    tail = (1 - ci) / 2 * 100
+    lo, hi = np.nanpercentile(rhos, [tail, 100 - tail])
+    return {'rho': float(spearmanr(x, y).statistic), 'lo': float(lo), 'hi': float(hi)}
 
 
 def bootstrap_mean(

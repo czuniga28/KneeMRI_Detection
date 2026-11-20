@@ -50,3 +50,24 @@ def pad_volume(volume: np.ndarray, target_height: int, target_width: int) -> np.
     fill_value = volume.min()
     pad_width = ((0, 0), (0, target_height - h), (0, target_width - w))
     return np.pad(volume, pad_width, mode="constant", constant_values=fill_value)
+
+
+def preprocess_volume(raw: np.ndarray, prep: dict) -> np.ndarray:
+    """
+    Raw (D, h, w) volume to the stored training input: normalize_volume, then
+    pad_volume, then cast to storage_dtype.
+
+    The single definition shared by scripts/build_dataset.py and deployment
+    (src/deploy/predict.py), so the two cannot drift apart. The cast is part of
+    the contract: the model was trained on values rounded to storage_dtype.
+
+    Args:
+        raw: Raw volume of shape (D, h, w).
+        prep: The 'preprocess' section of configs/prep.yaml.
+
+    Returns:
+        Array of shape (D, pad_height, pad_width) and dtype storage_dtype.
+    """
+    vol = normalize_volume(raw, prep['clip_low_pct'], prep['clip_high_pct'])
+    vol = pad_volume(vol, prep['pad_height'], prep['pad_width'])
+    return vol.astype(prep['storage_dtype'])

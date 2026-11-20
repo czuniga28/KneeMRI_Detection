@@ -8,7 +8,7 @@ from src.data.manifest import build_manifest
 from src.data.split import assign_splits
 from src.data.qa import run_qa_checks
 from src.data.slices import build_slice_index
-from src.data.transforms import normalize_volume, pad_volume
+from src.data.transforms import preprocess_volume
 
 def main():
     # Enforce that paths are relative to the project root
@@ -23,11 +23,6 @@ def main():
     volumes_dir = project_root / config['data']['volumes_dir']
     interim_dir = project_root / config['data']['interim_dir']
     processed_dir = project_root / config['data']['processed_dir']
-    clip_low_pct = config['preprocess']['clip_low_pct']
-    clip_high_pct = config['preprocess']['clip_high_pct']
-    pad_height = config['preprocess']['pad_height']
-    pad_width = config['preprocess']['pad_width']
-    storage_dtype = config['preprocess']['storage_dtype']
     seed = config['seed']
     n_test_splits = config['split']['n_test_splits']
     n_cv_folds = config['split']['n_cv_folds']
@@ -82,10 +77,7 @@ def main():
 
     print(f"\nProcessing volumes into {volumes_out_dir}...")
     for _, row in tqdm(manifest_df.iterrows(), total=len(manifest_df)):
-        raw = load_volume(volumes_dir / row['path'])
-        vol = normalize_volume(raw, clip_low_pct, clip_high_pct)
-        vol = pad_volume(vol, pad_height, pad_width)
-        vol = vol.astype(storage_dtype)
+        vol = preprocess_volume(load_volume(volumes_dir / row['path']), config['preprocess'])
         np.save(processed_dir / processed_volume_file(row['examId'], row['seriesNo']), vol)
 
     # Slice index: one row per slice, labelled by whether it contains the ACL

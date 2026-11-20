@@ -37,6 +37,36 @@ def stack_25d(vol: np.ndarray, s: int, context: int = 1) -> np.ndarray:
     return vol[neighbours].astype(np.float32)
 
 
+def _resize(img: np.ndarray, size: int) -> torch.Tensor:
+    """(3, H, W) array to a (3, size, size) tensor, the one resize training uses."""
+    return F.interpolate(
+        torch.from_numpy(np.asarray(img))[None],
+        size=(size, size),
+        mode='bilinear',
+        align_corners=False,
+        antialias=True,
+    )[0]
+
+
+def slice_image(vol: np.ndarray, s: int, size: int, context: int) -> torch.Tensor:
+    """
+    Model input for slice s of a preprocessed volume, without augmentation.
+
+    The single definition shared by SliceDataset (augment=False) and deployment
+    (src/deploy/predict.py), so the two cannot drift apart.
+
+    Args:
+        vol: Preprocessed volume of shape (D, H, W), as from preprocess_volume.
+        s: Index of the central slice.
+        size: Side of the square image returned.
+        context: Passed to stack_25d.
+
+    Returns:
+        A float32 tensor of shape (3, size, size).
+    """
+    return _resize(stack_25d(vol, s, context), size)
+
+
 def hflip(img: np.ndarray, box: tuple[int, int, int, int]) -> tuple[np.ndarray, tuple[int, int, int, int]]:
     """
     Flip an image and its box horizontally.
@@ -170,25 +200,22 @@ class SliceDataset(Dataset):
 
     def __getitem__(self, i: int) -> dict[str, torch.Tensor | int]:
         has_box = bool(self.contains_acl[i])
-        img = stack_25d(self._load_volume(self.volume_files[i]), self.slice_idx[i], self.context)
+        vol = self._load_volume(self.volume_files[i])
 
         # Negatives carry a placeholder through the geometry: their box is reset below
         box = self.boxes[i] if has_box else np.zeros(4)
         if self.augment:
-            img, box = self._augment(img, box)
+            # The shift sits between stack_25d and the resize, so slice_image cannot be used
+            img, box = self._augment(stack_25d(vol, self.slice_idx[i], self.context), box)
+            image = _resize(img, self.size)
+        else:
+            image = slice_image(vol, self.slice_idx[i], self.size, self.context)
 
-        height, width = img.shape[-2:]
+        # Augmentation keeps the in-plane shape, so the volume's is the image's
+        height, width = vol.shape[-2:]
         box = np.asarray(box, dtype=float) / np.array([width, height, width, height], dtype=float)
         if not has_box:
             box = np.zeros(4)
-
-        image = F.interpolate(
-            torch.from_numpy(np.asarray(img))[None],
-            size=(self.size, self.size),
-            mode='bilinear',
-            align_corners=False,
-            antialias=True,
-        )[0]
 
         return {
             'image': image,

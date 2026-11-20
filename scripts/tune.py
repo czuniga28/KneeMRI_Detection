@@ -15,7 +15,7 @@ from src.train.loop import PROJECT_ROOT, run, write_provenance
 
 OPTUNA_DIR = PROJECT_ROOT / 'runs' / 'optuna'
 TRIALS_CSV = PROJECT_ROOT / 'reports' / 'fase3' / 'optuna_trials.csv'
-FIGS_DIR = PROJECT_ROOT / 'docs' / 'entregable3' / 'figs'
+FIGS_DIR = PROJECT_ROOT / 'reports' / 'figures'
 BEST_CFG = PROJECT_ROOT / 'configs' / 'train' / 'm1_best.yaml'
 STUDY_NAME = 'm1'
 

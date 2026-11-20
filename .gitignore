@@ -7,3 +7,11 @@ datasets/
 .pytest_cache/
 # Checkpoints and per-run outputs (~45 MB each); summaries go to reports/
 runs/
+# LaTeX build files
+*.aux
+*.log
+*.nav
+*.out
+*.snm
+*.toc
+*.synctex.gz

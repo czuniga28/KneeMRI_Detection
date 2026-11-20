@@ -15,7 +15,7 @@ from src.eval.metrics import summarize_iou
 from src.train.loop import KEY, PROJECT_ROOT, load_data, volume_boxes
 
 REPORTS_DIR = PROJECT_ROOT / 'reports' / 'fase3'
-FIGS_DIR = PROJECT_ROOT / 'docs' / 'entregable3' / 'figs'
+FIGS_DIR = PROJECT_ROOT / 'reports' / 'figures'
 BASE = ('kadane', 'wmedian')
 
 

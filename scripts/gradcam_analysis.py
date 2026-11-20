@@ -21,7 +21,7 @@ from src.train.dataset import SliceDataset
 from src.train.loop import KEY, PROJECT_ROOT, evaluate, get_device, load_data, volume_boxes
 
 REPORTS_DIR = PROJECT_ROOT / 'reports' / 'fase3'
-FIGS_DIR = PROJECT_ROOT / 'docs' / 'entregable3' / 'figs'
+FIGS_DIR = PROJECT_ROOT / 'reports' / 'figures'
 # Same tau as the refit and test, so the IoU here is the one reported
 REFIT_CFG = PROJECT_ROOT / 'configs' / 'train' / 'm1_refit.yaml'
 FOLDS = DEV_FOLDS

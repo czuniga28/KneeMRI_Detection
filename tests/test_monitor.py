@@ -133,13 +133,13 @@ def test_cli_fit_then_check_appends_summary_rows(tmp_path):
 
 
 def test_shift_transforms_keep_dtype_and_respect_limits():
-    from scripts.simulate_shift import SHIFTS
+    from scripts.simulate_shift import parse_shift
     from src.deploy.predict import check_input
     raw = np.random.default_rng(0).integers(0, 4096, size=(4, 300, 310)).astype(np.uint16)
-    z = SHIFTS['zoom080'](raw)
+    z = parse_shift('zoom080')[0](raw)
     assert z.dtype == np.uint16 and z.shape == (4, 240, 248)
-    z = SHIFTS['zoom125'](raw)
+    z = parse_shift('zoom125')[0](raw)
     assert z.dtype == np.uint16 and z.shape == (4, 320, 320)
     check_input(z)
-    g = SHIFTS['gain070'](np.array([[[0, 1000, 4095]]], dtype=np.uint16))
+    g = parse_shift('gain070')[0](np.array([[[0, 1000, 4095]]], dtype=np.uint16))
     assert g.dtype == np.uint16 and g.tolist() == [[[0, 700, 2866]]]
